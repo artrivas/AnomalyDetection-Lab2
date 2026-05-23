@@ -53,6 +53,7 @@ def train_classes(
     config: dict[str, Any],
     resume: str | None = None,
     epochs_override: int | None = None,
+    early_stopping_patience: int | None = None,
     debug: bool = False,
 ) -> None:
     """Train one class or all MVTec classes."""
@@ -72,6 +73,7 @@ def train_classes(
             config=config,
             resume=resume,
             epochs_override=epochs_override,
+            early_stopping_patience=early_stopping_patience,
             debug=debug,
         )
 
@@ -81,6 +83,7 @@ def train_one_class(
     config: dict[str, Any],
     resume: str | None = None,
     epochs_override: int | None = None,
+    early_stopping_patience: int | None = None,
     debug: bool = False,
 ) -> None:
     """Train DRAEM for a single MVTec class."""
@@ -88,6 +91,8 @@ def train_one_class(
     config = dict(config)
     if epochs_override is not None:
         config["epochs"] = epochs_override
+    if early_stopping_patience is not None:
+        config["early_stopping_patience"] = early_stopping_patience
     if debug:
         config["num_workers"] = 0
         config["batch_size"] = min(int(config.get("batch_size", 8)), 2)
@@ -162,13 +167,16 @@ def train_one_class(
     )
     optimizer = Adam(model.parameters(), lr=float(config.get("learning_rate", 1e-4)))
     epochs = int(config.get("epochs", 100))
+    patience = int(config.get("early_stopping_patience", 10))
+    min_delta = float(config.get("early_stopping_min_delta", 0.0))
     scheduler = CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     scaler = GradScaler(enabled=use_amp)
 
     start_epoch = 1
     best_val_loss = float("inf")
+    epochs_without_improvement = 0
     if resume:
-        start_epoch, best_val_loss = load_checkpoint(
+        start_epoch, best_val_loss, epochs_without_improvement = load_checkpoint(
             Path(resume),
             model,
             optimizer,
@@ -227,6 +235,13 @@ def train_one_class(
         append_log_row(log_path, row)
         write_tensorboard(writer, row)
 
+        improved = val_metrics["loss"] < (best_val_loss - min_delta)
+        if improved:
+            best_val_loss = val_metrics["loss"]
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
         state = checkpoint_state(
             epoch=epoch,
             class_name=class_name,
@@ -235,14 +250,13 @@ def train_one_class(
             scheduler=scheduler,
             scaler=scaler,
             use_amp=use_amp,
-            best_val_loss=min(best_val_loss, val_metrics["loss"]),
+            best_val_loss=best_val_loss,
+            epochs_without_improvement=epochs_without_improvement,
             config=config,
         )
         save_checkpoint(state, checkpoint_dir / "last.pth")
 
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
-            state["best_val_loss"] = best_val_loss
+        if improved:
             save_checkpoint(state, checkpoint_dir / "best.pth")
 
         if epoch % int(config.get("checkpoint_every", 5)) == 0:
@@ -256,6 +270,12 @@ def train_one_class(
             f"train={row['train_loss']:.5f} val={row['val_loss']:.5f} "
             f"lr={lr:.6g} time={epoch_seconds:.1f}s"
         )
+        if patience > 0 and epochs_without_improvement >= patience:
+            print(
+                f"[{class_name}] early stopping at epoch {epoch}: "
+                f"no val_loss improvement > {min_delta:g} for {patience} epochs."
+            )
+            break
 
     if writer is not None:
         writer.close()
@@ -416,6 +436,7 @@ def checkpoint_state(
     scaler: GradScaler,
     use_amp: bool,
     best_val_loss: float,
+    epochs_without_improvement: int,
     config: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -426,6 +447,7 @@ def checkpoint_state(
         "scheduler_state": scheduler.state_dict(),
         "scaler_state": scaler.state_dict() if use_amp else None,
         "best_val_loss": best_val_loss,
+        "epochs_without_improvement": epochs_without_improvement,
         "config": config,
         "rng_state": {
             "python": random.getstate(),
@@ -448,7 +470,7 @@ def load_checkpoint(
     scheduler: CosineAnnealingLR,
     scaler: GradScaler,
     device: torch.device,
-) -> tuple[int, float]:
+) -> tuple[int, float, int]:
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint does not exist: {path}")
 
@@ -471,8 +493,9 @@ def load_checkpoint(
 
     start_epoch = int(checkpoint["epoch"]) + 1
     best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+    epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
     print(f"Resumed from {path} at epoch {start_epoch}.")
-    return start_epoch, best_val_loss
+    return start_epoch, best_val_loss, epochs_without_improvement
 
 
 def ensure_log_header(log_path: Path) -> None:

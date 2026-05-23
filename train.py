@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
         help="Override the number of training epochs from the config.",
     )
     parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=None,
+        help=(
+            "Override early stopping patience. Set to 0 or a negative value "
+            "to disable early stopping."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Run a short debug training loop with fewer workers and batches.",
@@ -98,6 +107,7 @@ def main() -> None:
         config=config,
         resume=args.resume,
         epochs_override=args.epochs,
+        early_stopping_patience=args.early_stopping_patience,
         debug=args.debug,
     )
 

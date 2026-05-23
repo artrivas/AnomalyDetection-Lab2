@@ -4,6 +4,8 @@ output_path: "./outputs"
 image_size: 256
 batch_size: 8
 epochs: 100
+early_stopping_patience: 10
+early_stopping_min_delta: 0.0
 learning_rate: 0.0001
 num_workers: 4
 train_val_split: 0.8
