@@ -73,6 +73,37 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override morphological closing kernel size.",
     )
+    parser.add_argument(
+        "--threshold_sweep",
+        action="store_true",
+        help="Evaluate validation-normal percentile thresholds without retraining.",
+    )
+    parser.add_argument(
+        "--oracle_threshold_analysis",
+        action="store_true",
+        help="Run test-mask oracle threshold analysis. Analysis only; never used as main threshold.",
+    )
+    parser.add_argument(
+        "--postprocess_ablation",
+        action="store_true",
+        help="Compare post-processing settings without retraining.",
+    )
+    parser.add_argument(
+        "--debug_visuals",
+        action="store_true",
+        help="Save best/worst anomaly visualizations for debugging.",
+    )
+    parser.add_argument(
+        "--max_debug_visuals",
+        type=int,
+        default=20,
+        help="Maximum debug visualizations per class.",
+    )
+    parser.add_argument(
+        "--check_masks",
+        action="store_true",
+        help="Validate predicted and ground-truth mask alignment and binary assumptions.",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +123,12 @@ def main() -> None:
         min_component_area=args.min_component_area,
         closing_kernel_size=args.closing_kernel_size,
         max_visuals_per_defect=args.max_visuals_per_defect,
+        threshold_sweep=args.threshold_sweep,
+        oracle_threshold_analysis=args.oracle_threshold_analysis,
+        postprocess_ablation=args.postprocess_ablation,
+        debug_visuals=args.debug_visuals,
+        max_debug_visuals=args.max_debug_visuals,
+        check_masks=args.check_masks,
     )
 
 

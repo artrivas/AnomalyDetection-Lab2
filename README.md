@@ -134,6 +134,96 @@ Limit saved visualizations per defect type with:
 python evaluate.py --class_name bottle --save_visuals --max_visuals_per_defect 10
 ```
 
+## Evaluation Debugging Before Retraining
+
+Do not retrain immediately when a class has low F1. First verify that the
+evaluation pipeline is measuring the lab target: pixel-level segmentation F1 on
+anomalous test images only. Good test images are useful for false-positive
+diagnostics, but empty good-image masks should not inflate the main segmentation
+F1.
+
+Start by checking anomaly-only metrics:
+
+```bash
+python evaluate.py --class_name capsule --checkpoint_type best
+```
+
+The main lab metrics in `outputs/metrics/<class_name>/summary.json` are:
+
+```text
+anomaly_only_mean_f1
+anomaly_only_global_f1
+anomaly_only_precision
+anomaly_only_recall
+```
+
+The old all-image metrics are still saved as `all_images_mean_f1` and
+`all_images_global_f1`, but `all_images_mean_f1` may be inflated by normal
+images.
+
+Next, run a normal-validation threshold sweep without retraining:
+
+```bash
+python evaluate.py --class_name capsule --checkpoint_type best --threshold_sweep
+```
+
+This writes:
+
+```text
+outputs/metrics/<class_name>/threshold_sweep.csv
+outputs/metrics/<class_name>/selected_threshold.json
+```
+
+For all classes:
+
+```bash
+python evaluate.py --class_name all --checkpoint_type best --threshold_sweep
+```
+
+This also writes:
+
+```text
+outputs/metrics/threshold_sweep_global.csv
+```
+
+Then inspect failed examples visually:
+
+```bash
+python evaluate.py --class_name capsule --checkpoint_type best --debug_visuals --max_debug_visuals 20
+```
+
+Debug grids are saved under:
+
+```text
+outputs/visualizations/debug/<class_name>/
+```
+
+Each grid shows the original image, reconstruction, raw anomaly map, smoothed
+anomaly map, predicted mask, ground-truth mask, and overlay. Use these to decide
+whether the model localizes defects but the threshold is too high, whether
+post-processing removes small defects, or whether the raw anomaly map is flat.
+
+Compare post-processing settings before changing training:
+
+```bash
+python evaluate.py --class_name capsule --checkpoint_type best --postprocess_ablation
+```
+
+The ablation includes no post-processing, Gaussian smoothing, connected
+component filtering with small areas such as 5, 10, and 20 pixels, closing, and
+combined modes. This matters for small-defect classes such as capsule, screw,
+grid, and toothbrush.
+
+Use mask checks when debugging possible dataset or resizing issues:
+
+```bash
+python evaluate.py --class_name capsule --check_masks
+```
+
+Retrain only after these checks show that the raw anomaly maps are flat,
+reconstructions are poor, or the model genuinely fails to separate defective
+regions from normal validation scores.
+
 ## Output Folders
 
 ```text

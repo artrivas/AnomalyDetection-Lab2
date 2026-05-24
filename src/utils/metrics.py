@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+import numpy as np
+
 
 EPSILON = 1e-8
 
@@ -13,26 +15,18 @@ def compute_pixel_counts(
     prediction: Any,
     target: Any,
 ) -> dict[str, int]:
-    prediction_values = _to_flat_binary_list(prediction)
-    target_values = _to_flat_binary_list(target)
+    prediction_values = _to_binary_array(prediction)
+    target_values = _to_binary_array(target)
 
-    if len(prediction_values) != len(target_values):
+    if prediction_values.shape != target_values.shape:
         raise ValueError(
-            f"Prediction and target sizes must match, got {len(prediction_values)} "
-            f"and {len(target_values)}."
+            f"Prediction and target sizes must match, got {prediction_values.shape} "
+            f"and {target_values.shape}."
         )
 
-    true_positive = 0
-    false_positive = 0
-    false_negative = 0
-
-    for prediction_value, target_value in zip(prediction_values, target_values):
-        if prediction_value and target_value:
-            true_positive += 1
-        elif prediction_value and not target_value:
-            false_positive += 1
-        elif not prediction_value and target_value:
-            false_negative += 1
+    true_positive = int(np.logical_and(prediction_values, target_values).sum())
+    false_positive = int(np.logical_and(prediction_values, ~target_values).sum())
+    false_negative = int(np.logical_and(~prediction_values, target_values).sum())
 
     return {
         "tp": true_positive,
@@ -156,6 +150,12 @@ def _to_flat_binary_list(values: Any) -> list[bool]:
     if hasattr(values, "tolist"):
         values = values.tolist()
     return [bool(value) for value in _flatten(values)]
+
+
+def _to_binary_array(values: Any) -> np.ndarray:
+    if hasattr(values, "detach"):
+        values = values.detach().cpu().numpy()
+    return np.asarray(values).astype(bool)
 
 
 def _flatten(values: Any) -> list[Any]:
