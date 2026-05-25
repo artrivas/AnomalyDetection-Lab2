@@ -7,11 +7,28 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from src.data.mvtec_paths import MVTEC_CLASSES
 from src.data.mvtec_train_dataset import MVTecTrainDataset
 from src.models import DRAEM
+
+
+def get_evaluation_threshold_percentile(config: dict[str, Any]) -> float:
+    evaluation = config.get("evaluation", {})
+    if isinstance(evaluation, dict) and "threshold_percentile" in evaluation:
+        return float(evaluation["threshold_percentile"])
+    return float(config.get("threshold_percentile", 99.5))
+
+
+def get_evaluation_gaussian_sigma(config: dict[str, Any]) -> float:
+    evaluation = config.get("evaluation", {})
+    if isinstance(evaluation, dict):
+        postprocessing = evaluation.get("postprocessing", {})
+        if isinstance(postprocessing, dict) and "gaussian_sigma" in postprocessing:
+            return float(postprocessing["gaussian_sigma"])
+    return float(config.get("gaussian_sigma", 4.0))
 
 
 @torch.no_grad()
@@ -58,10 +75,12 @@ def compute_normal_validation_threshold(
     )
 
     anomaly_values: list[torch.Tensor] = []
+    gaussian_sigma = get_evaluation_gaussian_sigma(config)
     for batch in val_loader:
         images = batch["image"].to(resolved_device, non_blocking=True)
         outputs = model(images)
-        anomaly_values.append(outputs["anomaly_map"].detach().float().cpu().flatten())
+        anomaly_map = gaussian_smooth(outputs["anomaly_map"].detach().float(), gaussian_sigma)
+        anomaly_values.append(anomaly_map.cpu().flatten())
 
     if not anomaly_values:
         raise RuntimeError(
@@ -69,7 +88,7 @@ def compute_normal_validation_threshold(
         )
 
     all_values = torch.cat(anomaly_values, dim=0)
-    threshold_percentile = float(config.get("threshold_percentile", 99.5))
+    threshold_percentile = get_evaluation_threshold_percentile(config)
     threshold = torch.quantile(all_values, threshold_percentile / 100.0).item()
 
     result = {
@@ -109,6 +128,28 @@ def save_threshold_json(result: dict[str, Any], config: dict[str, Any]) -> Path:
         json.dump(result, file, indent=2)
         file.write("\n")
     return threshold_path
+
+
+def gaussian_smooth(anomaly_map: torch.Tensor, sigma: float) -> torch.Tensor:
+    if sigma <= 0:
+        return anomaly_map
+
+    radius = max(1, int(3 * sigma))
+    coords = torch.arange(
+        -radius,
+        radius + 1,
+        device=anomaly_map.device,
+        dtype=anomaly_map.dtype,
+    )
+    kernel_1d = torch.exp(-(coords**2) / (2 * sigma**2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_x = kernel_1d.view(1, 1, 1, -1)
+    kernel_y = kernel_1d.view(1, 1, -1, 1)
+
+    smoothed = F.pad(anomaly_map, (radius, radius, 0, 0), mode="reflect")
+    smoothed = F.conv2d(smoothed, kernel_x)
+    smoothed = F.pad(smoothed, (0, 0, radius, radius), mode="reflect")
+    return F.conv2d(smoothed, kernel_y)
 
 
 def oracle_analysis_only_threshold(*_: Any, **__: Any) -> None:

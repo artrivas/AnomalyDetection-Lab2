@@ -3,8 +3,8 @@ dtd_path: "./dataset/dtd/images"
 output_path: "./outputs"
 image_size: 256
 batch_size: 8
-epochs: 100
-early_stopping_patience: 10
+epochs: 300
+early_stopping_patience: 30
 early_stopping_min_delta: 0.0
 learning_rate: 0.0001
 num_workers: 4
@@ -15,8 +15,53 @@ segmentation_weight: 1.0
 checkpoint_every: 0
 save_visual_every: 5
 use_amp: true
+gradient_clip_norm: 1.0
 seed: 42
 p_no_anomaly: 0.0
 gaussian_sigma: 4.0
 min_component_area: 16
 closing_kernel_size: 5
+
+loss:
+  reconstruction_weight: 1.0
+  segmentation_weight: 1.0
+  mse_weight: 1.0
+  ssim_weight: 1.0
+  bce_weight: 1.0
+  dice_weight: 1.0
+  use_focal: true
+  focal_weight: 1.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+training:
+  epochs: 300
+  early_stopping_patience: 30
+  learning_rate: 0.0001
+  batch_size: 8
+  use_amp: true
+  gradient_clip_norm: 1.0
+
+evaluation:
+  threshold_percentile: 99.5
+  threshold_percentile_candidates: [90, 92.5, 95, 97, 98, 99, 99.5]
+  official_threshold_source: "normal_validation_percentile"
+
+  postprocessing:
+    gaussian_sigma: 4.0
+    min_component_area: 16
+    use_closing: true
+    closing_kernel_size: 5
+
+  weak_class_postprocessing:
+    gaussian_sigma: 1.0
+    min_component_area: 0
+    use_closing: false
+    closing_kernel_size: 3
+
+  postprocess_ablation:
+    gaussian_sigmas: [0.0, 1.0, 2.0, 4.0]
+    min_component_areas: [0, 5, 10, 16, 20]
+    use_closing_values: [false, true]
+
+  report_main_metric: "anomaly_only_mean_f1"

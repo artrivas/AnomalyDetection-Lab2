@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from src.data.mvtec_paths import MVTEC_CLASSES
 from src.data.mvtec_test_dataset import MVTecTestDataset
 from src.data.mvtec_train_dataset import MVTecTrainDataset
-from src.eval.thresholding import load_model_from_checkpoint
+from src.eval.thresholding import load_model_from_checkpoint, save_threshold_json
 from src.eval.visualize_results import (
     mark_visual_saved,
     save_debug_visualization,
@@ -27,7 +27,7 @@ from src.eval.visualize_results import (
 from src.utils.metrics import build_metric_record, precision_recall_f1
 
 
-THRESHOLD_SWEEP_PERCENTILES = [95, 97, 98, 99, 99.5]
+THRESHOLD_SWEEP_PERCENTILES = [90, 92.5, 95, 97, 98, 99, 99.5]
 ORACLE_THRESHOLD_COUNT = 101
 
 PER_IMAGE_COLUMNS = [
@@ -63,18 +63,27 @@ SWEEP_COLUMNS = [
     "recall",
     "normal_false_positive_pixel_rate",
     "normal_images_with_any_prediction",
+    "mean_predicted_area",
+    "mean_gt_area",
 ]
 
 POSTPROCESS_ABLATION_COLUMNS = [
     "class_name",
     "mode",
+    "threshold_percentile",
+    "threshold_value",
     "gaussian_sigma",
     "min_component_area",
     "use_closing",
+    "closing_kernel_size",
     "anomaly_only_mean_f1",
     "anomaly_only_global_f1",
     "precision",
     "recall",
+    "normal_false_positive_pixel_rate",
+    "normal_images_with_any_prediction",
+    "mean_predicted_area",
+    "mean_gt_area",
 ]
 
 
@@ -92,15 +101,112 @@ class EvaluationSample:
     reconstruction: torch.Tensor | None = None
 
 
+def resolve_evaluation_config(
+    config: dict[str, Any],
+    threshold_percentile: float | None = None,
+    gaussian_sigma: float | None = None,
+    min_component_area: int | None = None,
+    no_closing: bool = False,
+    closing_kernel_size: int | None = None,
+    use_weak_class_postprocessing: bool = False,
+) -> dict[str, Any]:
+    evaluation = config.get("evaluation", {})
+    if not isinstance(evaluation, dict):
+        evaluation = {}
+    postprocessing = evaluation.get("postprocessing", {})
+    if not isinstance(postprocessing, dict):
+        postprocessing = {}
+
+    resolved = {
+        "threshold_percentile": float(
+            evaluation.get(
+                "threshold_percentile",
+                config.get("threshold_percentile", 99.5),
+            )
+        ),
+        "threshold_percentile_candidates": [
+            float(value)
+            for value in evaluation.get(
+                "threshold_percentile_candidates",
+                THRESHOLD_SWEEP_PERCENTILES,
+            )
+        ],
+        "official_threshold_source": str(
+            evaluation.get("official_threshold_source", "normal_validation_percentile")
+        ),
+        "gaussian_sigma": float(
+            postprocessing.get("gaussian_sigma", config.get("gaussian_sigma", 4.0))
+        ),
+        "min_component_area": int(
+            postprocessing.get("min_component_area", config.get("min_component_area", 16))
+        ),
+        "use_closing": bool(postprocessing.get("use_closing", True)),
+        "closing_kernel_size": int(
+            postprocessing.get(
+                "closing_kernel_size",
+                config.get("closing_kernel_size", 5),
+            )
+        ),
+        "report_main_metric": str(
+            evaluation.get("report_main_metric", "anomaly_only_mean_f1")
+        ),
+    }
+
+    ablation = evaluation.get("postprocess_ablation", {})
+    if not isinstance(ablation, dict):
+        ablation = {}
+    resolved["postprocess_ablation"] = {
+        "gaussian_sigmas": [
+            float(value)
+            for value in ablation.get("gaussian_sigmas", [0.0, 1.0, 2.0, 4.0])
+        ],
+        "min_component_areas": [
+            int(value) for value in ablation.get("min_component_areas", [0, 5, 10, 16, 20])
+        ],
+        "use_closing_values": [
+            bool(value) for value in ablation.get("use_closing_values", [False, True])
+        ],
+    }
+
+    if use_weak_class_postprocessing:
+        weak = evaluation.get("weak_class_postprocessing", {})
+        if not isinstance(weak, dict):
+            weak = {}
+        resolved.update(
+            {
+                "gaussian_sigma": float(weak.get("gaussian_sigma", 1.0)),
+                "min_component_area": int(weak.get("min_component_area", 0)),
+                "use_closing": bool(weak.get("use_closing", False)),
+                "closing_kernel_size": int(weak.get("closing_kernel_size", 3)),
+            }
+        )
+
+    if threshold_percentile is not None:
+        resolved["threshold_percentile"] = float(threshold_percentile)
+    if gaussian_sigma is not None:
+        resolved["gaussian_sigma"] = float(gaussian_sigma)
+    if min_component_area is not None:
+        resolved["min_component_area"] = int(min_component_area)
+    if no_closing:
+        resolved["use_closing"] = False
+    if closing_kernel_size is not None:
+        resolved["closing_kernel_size"] = int(closing_kernel_size)
+
+    return resolved
+
+
 def evaluate_classes(
     class_name: str,
     config: dict[str, Any],
     checkpoint: str | None = None,
     checkpoint_type: str = "best",
     save_visuals: bool = False,
+    threshold_percentile: float | None = None,
     gaussian_sigma: float | None = None,
     min_component_area: int | None = None,
+    no_closing: bool = False,
     closing_kernel_size: int | None = None,
+    use_weak_class_postprocessing: bool = False,
     max_visuals_per_defect: int | None = None,
     threshold_sweep: bool = False,
     oracle_threshold_analysis: bool = False,
@@ -118,6 +224,15 @@ def evaluate_classes(
         raise ValueError("--checkpoint is only supported when evaluating a single class.")
 
     output_path = Path(config.get("output_path", "./outputs"))
+    evaluation_config = resolve_evaluation_config(
+        config,
+        threshold_percentile=threshold_percentile,
+        gaussian_sigma=gaussian_sigma,
+        min_component_area=min_component_area,
+        no_closing=no_closing,
+        closing_kernel_size=closing_kernel_size,
+        use_weak_class_postprocessing=use_weak_class_postprocessing,
+    )
     all_records: list[dict[str, Any]] = []
     class_summaries: list[dict[str, Any]] = []
     all_sweep_rows: list[dict[str, Any]] = []
@@ -134,9 +249,7 @@ def evaluate_classes(
             config=config,
             checkpoint_path=checkpoint_path,
             save_visuals=save_visuals,
-            gaussian_sigma=gaussian_sigma,
-            min_component_area=min_component_area,
-            closing_kernel_size=closing_kernel_size,
+            evaluation_config=evaluation_config,
             max_visuals_per_defect=max_visuals_per_defect,
             threshold_sweep=threshold_sweep,
             oracle_threshold_analysis=oracle_threshold_analysis,
@@ -153,7 +266,11 @@ def evaluate_classes(
     if class_name == "all":
         save_global_summary(class_summaries, global_summary, config)
         if threshold_sweep:
-            save_csv(all_sweep_rows, output_path / "metrics" / "threshold_sweep_global.csv", SWEEP_COLUMNS)
+            save_csv(
+                all_sweep_rows,
+                output_path / "metrics" / "threshold_sweep_global.csv",
+                SWEEP_COLUMNS,
+            )
     return {
         "class_summaries": class_summaries,
         "global_summary": global_summary,
@@ -166,9 +283,7 @@ def evaluate_one_class(
     config: dict[str, Any],
     checkpoint_path: str | Path,
     save_visuals: bool = False,
-    gaussian_sigma: float | None = None,
-    min_component_area: int | None = None,
-    closing_kernel_size: int | None = None,
+    evaluation_config: dict[str, Any] | None = None,
     max_visuals_per_defect: int | None = None,
     threshold_sweep: bool = False,
     oracle_threshold_analysis: bool = False,
@@ -179,21 +294,13 @@ def evaluate_one_class(
 ) -> dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_path = Path(config.get("output_path", "./outputs"))
-    sigma = float(
-        gaussian_sigma
-        if gaussian_sigma is not None
-        else config.get("gaussian_sigma", 4.0)
-    )
-    min_area = int(
-        min_component_area
-        if min_component_area is not None
-        else config.get("min_component_area", 16)
-    )
-    close_kernel = int(
-        closing_kernel_size
-        if closing_kernel_size is not None
-        else config.get("closing_kernel_size", 5)
-    )
+    if evaluation_config is None:
+        evaluation_config = resolve_evaluation_config(config)
+    sigma = float(evaluation_config["gaussian_sigma"])
+    min_area = int(evaluation_config["min_component_area"])
+    use_closing = bool(evaluation_config["use_closing"])
+    close_kernel = int(evaluation_config["closing_kernel_size"])
+    threshold_percentile = float(evaluation_config["threshold_percentile"])
 
     model = load_model_from_checkpoint(checkpoint_path, device)
     model.eval()
@@ -202,6 +309,7 @@ def evaluate_one_class(
         config=config,
         model=model,
         device=device,
+        threshold_percentile=threshold_percentile,
         gaussian_sigma=sigma,
     )
     samples = collect_samples(
@@ -219,7 +327,7 @@ def evaluate_one_class(
         threshold_percentile=float(threshold_info["threshold_percentile"]),
         min_component_area=min_area,
         closing_kernel_size=close_kernel,
-        use_closing=True,
+        use_closing=use_closing,
         check_masks=check_masks,
     )
 
@@ -256,6 +364,8 @@ def evaluate_one_class(
             gaussian_sigma=sigma,
             min_component_area=min_area,
             closing_kernel_size=close_kernel,
+            use_closing=use_closing,
+            threshold_percentiles=list(evaluation_config["threshold_percentile_candidates"]),
             check_masks=check_masks,
         )
 
@@ -266,6 +376,7 @@ def evaluate_one_class(
             output_path=output_path,
             min_component_area=min_area,
             closing_kernel_size=close_kernel,
+            use_closing=use_closing,
             check_masks=check_masks,
         )
 
@@ -274,9 +385,12 @@ def evaluate_one_class(
             class_name=class_name,
             samples=samples,
             output_path=output_path,
+            config=config,
+            model=model,
+            device=device,
             threshold_value=float(threshold_info["threshold"]),
             threshold_percentile=float(threshold_info["threshold_percentile"]),
-            gaussian_sigma=sigma,
+            ablation_config=dict(evaluation_config["postprocess_ablation"]),
             check_masks=check_masks,
         )
 
@@ -334,7 +448,12 @@ def load_threshold_info(class_name: str, config: dict[str, Any]) -> dict[str, fl
         )
     return {
         "threshold": float(threshold_data["threshold"]),
-        "threshold_percentile": float(threshold_data.get("threshold_percentile", config.get("threshold_percentile", 99.5))),
+        "threshold_percentile": float(
+            threshold_data.get(
+                "threshold_percentile",
+                resolve_evaluation_config(config)["threshold_percentile"],
+            )
+        ),
     }
 
 
@@ -343,24 +462,40 @@ def load_or_compute_threshold_info(
     config: dict[str, Any],
     model: torch.nn.Module,
     device: torch.device,
+    threshold_percentile: float,
     gaussian_sigma: float,
 ) -> dict[str, float]:
     try:
-        return load_threshold_info(class_name, config)
+        threshold_info = load_threshold_info(class_name, config)
+        if float(threshold_info["threshold_percentile"]) == float(threshold_percentile):
+            return threshold_info
+        threshold_file_missing = False
     except FileNotFoundError:
-        percentile = float(config.get("threshold_percentile", 99.5))
-        thresholds = compute_validation_thresholds(
-            class_name=class_name,
-            config=config,
-            model=model,
-            device=device,
-            percentiles=[percentile],
-            gaussian_sigma=gaussian_sigma,
+        threshold_file_missing = True
+    thresholds = compute_validation_thresholds(
+        class_name=class_name,
+        config=config,
+        model=model,
+        device=device,
+        percentiles=[threshold_percentile],
+        gaussian_sigma=gaussian_sigma,
+    )
+    result = {
+        "threshold": thresholds[threshold_percentile],
+        "threshold_percentile": threshold_percentile,
+    }
+    configured_percentile = float(resolve_evaluation_config(config)["threshold_percentile"])
+    if threshold_file_missing and threshold_percentile == configured_percentile:
+        save_threshold_json(
+            {
+                "class_name": class_name,
+                "threshold_method": "normal_validation_percentile",
+                "threshold_percentile": threshold_percentile,
+                "threshold": float(result["threshold"]),
+            },
+            config,
         )
-        return {
-            "threshold": thresholds[percentile],
-            "threshold_percentile": percentile,
-        }
+    return result
 
 
 @torch.no_grad()
@@ -482,6 +617,7 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         pixel_total = 0
     normal_predicted_pixels = int(sum(record["predicted_area"] for record in normal_records))
     normal_count = len(normal_records)
+    area_records = anomaly_records if anomaly_records else records
 
     return {
         "anomaly_only_mean_f1": mean_f1(anomaly_records),
@@ -496,6 +632,16 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             sum(1 for record in normal_records if int(record["predicted_area"]) > 0)
         ),
         "normal_mean_predicted_anomaly_area": float(normal_predicted_pixels / normal_count) if normal_count else 0.0,
+        "mean_predicted_area": float(
+            sum(int(record["predicted_area"]) for record in area_records) / len(area_records)
+        )
+        if area_records
+        else 0.0,
+        "mean_gt_area": float(
+            sum(int(record["gt_area"]) for record in area_records) / len(area_records)
+        )
+        if area_records
+        else 0.0,
         "all_images_tp": all_summary["tp"],
         "all_images_fp": all_summary["fp"],
         "all_images_fn": all_summary["fn"],
@@ -569,6 +715,8 @@ def run_threshold_sweep(
     gaussian_sigma: float,
     min_component_area: int,
     closing_kernel_size: int,
+    use_closing: bool,
+    threshold_percentiles: list[float],
     check_masks: bool,
 ) -> list[dict[str, Any]]:
     output_path = Path(config.get("output_path", "./outputs"))
@@ -577,18 +725,18 @@ def run_threshold_sweep(
         config=config,
         model=model,
         device=device,
-        percentiles=THRESHOLD_SWEEP_PERCENTILES,
+        percentiles=threshold_percentiles,
         gaussian_sigma=gaussian_sigma,
     )
     rows: list[dict[str, Any]] = []
-    for percentile in THRESHOLD_SWEEP_PERCENTILES:
+    for percentile in threshold_percentiles:
         records = evaluate_samples(
             samples,
             threshold_value=thresholds[percentile],
             threshold_percentile=percentile,
             min_component_area=min_component_area,
             closing_kernel_size=closing_kernel_size,
-            use_closing=True,
+            use_closing=use_closing,
             check_masks=check_masks,
         )
         summary = summarize_records(records)
@@ -603,27 +751,37 @@ def run_threshold_sweep(
                 "recall": summary["anomaly_only_recall"],
                 "normal_false_positive_pixel_rate": summary["normal_false_positive_pixel_rate"],
                 "normal_images_with_any_prediction": summary["normal_images_with_any_prediction"],
+                "mean_predicted_area": summary["mean_predicted_area"],
+                "mean_gt_area": summary["mean_gt_area"],
             }
         )
 
     save_csv(rows, output_path / "metrics" / class_name / "threshold_sweep.csv", SWEEP_COLUMNS)
     selected = max(rows, key=lambda row: float(row["anomaly_only_mean_f1"]))
-    save_selected_threshold(class_name, selected, output_path)
+    save_selected_threshold(class_name, selected, rows, output_path)
     return rows
 
 
-def save_selected_threshold(class_name: str, selected: dict[str, Any], output_path: Path) -> None:
-    path = output_path / "metrics" / class_name / "selected_threshold.json"
+def save_selected_threshold(
+    class_name: str,
+    selected: dict[str, Any],
+    rows: list[dict[str, Any]],
+    output_path: Path,
+) -> None:
+    path = output_path / "metrics" / class_name / "selected_threshold_analysis.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "class_name": class_name,
-        "selection_method": "validation_percentile_sweep_selected",
-        "candidate_percentiles": THRESHOLD_SWEEP_PERCENTILES,
+        "analysis_only": True,
+        "uses_test_masks_for_selection": True,
+        "do_not_report_as_official": True,
+        "selection_method": "best_test_f1_from_normal_validation_percentile_sweep",
+        "candidate_percentiles": [float(row["threshold_percentile"]) for row in rows],
         "selected_percentile": float(selected["threshold_percentile"]),
         "selected_threshold": float(selected["threshold_value"]),
         "note": (
             "Threshold values are computed only from normal validation anomaly scores. "
-            "Selection is used as a lab hyperparameter sweep."
+            "The best row is selected using test-mask F1, so this is analysis only."
         ),
     }
     with path.open("w", encoding="utf-8") as file:
@@ -637,6 +795,7 @@ def run_oracle_threshold_analysis(
     output_path: Path,
     min_component_area: int,
     closing_kernel_size: int,
+    use_closing: bool,
     check_masks: bool,
 ) -> None:
     anomaly_values = np.concatenate(
@@ -649,9 +808,9 @@ def run_oracle_threshold_analysis(
             samples,
             threshold_value=threshold,
             threshold_percentile="oracle_analysis_only",
-            min_component_area=0,
-            closing_kernel_size=0,
-            use_closing=False,
+            min_component_area=min_component_area,
+            closing_kernel_size=closing_kernel_size,
+            use_closing=use_closing,
             check_masks=check_masks,
         )
         summary = summarize_records(records)
@@ -686,59 +845,121 @@ def run_postprocess_ablation(
     class_name: str,
     samples: list[EvaluationSample],
     output_path: Path,
+    config: dict[str, Any],
+    model: torch.nn.Module,
+    device: torch.device,
     threshold_value: float,
     threshold_percentile: float,
-    gaussian_sigma: float,
+    ablation_config: dict[str, Any],
     check_masks: bool,
 ) -> None:
+    gaussian_sigmas = list(ablation_config.get("gaussian_sigmas", [0.0, 1.0, 2.0, 4.0]))
+    min_component_areas = list(
+        ablation_config.get("min_component_areas", [0, 5, 10, 16, 20])
+    )
+    use_closing_values = list(ablation_config.get("use_closing_values", [False, True]))
+    closing_kernel_size = int(
+        resolve_evaluation_config(config).get("closing_kernel_size", 5)
+    )
+
     modes = [
-        ("no_postprocessing", 0.0, 0, False),
-        ("gaussian_only", gaussian_sigma, 0, False),
-        ("gaussian_remove_small_5", gaussian_sigma, 5, False),
-        ("gaussian_remove_small_10", gaussian_sigma, 10, False),
-        ("gaussian_remove_small_20", gaussian_sigma, 20, False),
-        ("gaussian_closing", gaussian_sigma, 0, True),
-        ("gaussian_remove_small_5_closing", gaussian_sigma, 5, True),
-        ("gaussian_remove_small_10_closing", gaussian_sigma, 10, True),
-        ("gaussian_remove_small_20_closing", gaussian_sigma, 20, True),
+        ("no_postprocessing", [0.0], [0], [False]),
+        ("gaussian_only", gaussian_sigmas, [0], [False]),
+        ("gaussian_closing", gaussian_sigmas, [0], use_closing_values),
+        ("gaussian_remove_small", gaussian_sigmas, min_component_areas, [False]),
+        (
+            "gaussian_remove_small_closing",
+            gaussian_sigmas,
+            min_component_areas,
+            use_closing_values,
+        ),
     ]
     rows: list[dict[str, Any]] = []
-    for mode, mode_sigma, min_area, use_closing in modes:
-        mode_samples = [
-            EvaluationSample(
-                **{
-                    **sample.__dict__,
-                    "smoothed_anomaly_map": sample.raw_anomaly_map
-                    if mode_sigma <= 0
-                    else sample.smoothed_anomaly_map,
-                }
-            )
-            for sample in samples
-        ]
-        records = evaluate_samples(
-            mode_samples,
-            threshold_value=threshold_value,
-            threshold_percentile=threshold_percentile,
-            min_component_area=min_area,
-            closing_kernel_size=5,
-            use_closing=use_closing,
-            check_masks=check_masks,
-        )
-        summary = summarize_records(records)
-        rows.append(
-            {
-                "class_name": class_name,
-                "mode": mode,
-                "gaussian_sigma": mode_sigma,
-                "min_component_area": min_area,
-                "use_closing": use_closing,
-                "anomaly_only_mean_f1": summary["anomaly_only_mean_f1"],
-                "anomaly_only_global_f1": summary["anomaly_only_global_f1"],
-                "precision": summary["anomaly_only_precision"],
-                "recall": summary["anomaly_only_recall"],
+    threshold_cache: dict[float, float] = {}
+    for mode, sigmas, min_areas, closing_values in modes:
+        for mode_sigma in sigmas:
+            mode_sigma = float(mode_sigma)
+            if mode_sigma not in threshold_cache:
+                threshold_cache[mode_sigma] = compute_validation_thresholds(
+                    class_name=class_name,
+                    config=config,
+                    model=model,
+                    device=device,
+                    percentiles=[float(threshold_percentile)],
+                    gaussian_sigma=mode_sigma,
+                )[float(threshold_percentile)]
+            mode_threshold = threshold_cache[mode_sigma]
+            mode_samples = with_smoothed_maps(samples, mode_sigma)
+            for min_area in min_areas:
+                for use_closing in closing_values:
+                    if "closing" not in mode and use_closing:
+                        continue
+                    if "closing" in mode and not use_closing:
+                        continue
+                    records = evaluate_samples(
+                        mode_samples,
+                        threshold_value=mode_threshold,
+                        threshold_percentile=threshold_percentile,
+                        min_component_area=int(min_area),
+                        closing_kernel_size=closing_kernel_size,
+                        use_closing=bool(use_closing),
+                        check_masks=check_masks,
+                    )
+                    summary = summarize_records(records)
+                    rows.append(
+                        {
+                            "class_name": class_name,
+                            "mode": mode,
+                            "threshold_percentile": threshold_percentile,
+                            "threshold_value": mode_threshold,
+                            "gaussian_sigma": mode_sigma,
+                            "min_component_area": int(min_area),
+                            "use_closing": bool(use_closing),
+                            "closing_kernel_size": closing_kernel_size,
+                            "anomaly_only_mean_f1": summary["anomaly_only_mean_f1"],
+                            "anomaly_only_global_f1": summary["anomaly_only_global_f1"],
+                            "precision": summary["anomaly_only_precision"],
+                            "recall": summary["anomaly_only_recall"],
+                            "normal_false_positive_pixel_rate": summary[
+                                "normal_false_positive_pixel_rate"
+                            ],
+                            "normal_images_with_any_prediction": summary[
+                                "normal_images_with_any_prediction"
+                            ],
+                            "mean_predicted_area": summary["mean_predicted_area"],
+                            "mean_gt_area": summary["mean_gt_area"],
+                        }
+                    )
+    save_csv(
+        rows,
+        output_path / "metrics" / class_name / "postprocess_ablation.csv",
+        POSTPROCESS_ABLATION_COLUMNS,
+    )
+
+
+def with_smoothed_maps(
+    samples: list[EvaluationSample],
+    gaussian_sigma: float,
+) -> list[EvaluationSample]:
+    return [
+        EvaluationSample(
+            **{
+                **sample.__dict__,
+                "smoothed_anomaly_map": smooth_numpy_map(
+                    sample.raw_anomaly_map,
+                    gaussian_sigma,
+                ),
             }
         )
-    save_csv(rows, output_path / "metrics" / class_name / "postprocess_ablation.csv", POSTPROCESS_ABLATION_COLUMNS)
+        for sample in samples
+    ]
+
+
+def smooth_numpy_map(anomaly_map: np.ndarray, sigma: float) -> np.ndarray:
+    if sigma <= 0:
+        return anomaly_map
+    tensor = torch.from_numpy(anomaly_map).view(1, 1, *anomaly_map.shape).float()
+    return gaussian_smooth(tensor, sigma)[0, 0].numpy().astype(np.float32)
 
 
 def gaussian_smooth(anomaly_map: torch.Tensor, sigma: float) -> torch.Tensor:

@@ -37,8 +37,14 @@ except ImportError:  # pragma: no cover - optional dependency
 LOG_COLUMNS = [
     "epoch",
     "train_loss",
+    "train_mse_loss",
+    "train_ssim_loss",
+    "train_bce_loss",
+    "train_dice_loss",
+    "train_focal_loss",
     "train_recon_loss",
     "train_seg_loss",
+    "train_total_loss",
     "val_loss",
     "val_recon_loss",
     "val_anomaly_mean",
@@ -78,6 +84,97 @@ def train_classes(
         )
 
 
+def resolve_loss_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve nested loss config with old flat keys as fallbacks."""
+
+    loss_section = config.get("loss", {})
+    if not isinstance(loss_section, dict):
+        loss_section = {}
+
+    return {
+        "reconstruction_weight": _float_config(
+            loss_section, config, "reconstruction_weight", 1.0
+        ),
+        "segmentation_weight": _float_config(
+            loss_section, config, "segmentation_weight", 1.0
+        ),
+        "mse_weight": _float_config(loss_section, config, "mse_weight", 1.0),
+        "ssim_weight": _float_config(loss_section, config, "ssim_weight", 0.0),
+        "bce_weight": _float_config(loss_section, config, "bce_weight", 1.0),
+        "dice_weight": _float_config(loss_section, config, "dice_weight", 1.0),
+        "use_focal": _bool_config(loss_section, config, "use_focal", False),
+        "focal_weight": _float_config(loss_section, config, "focal_weight", 1.0),
+        "focal_alpha": _float_config(loss_section, config, "focal_alpha", 0.25),
+        "focal_gamma": _float_config(loss_section, config, "focal_gamma", 2.0),
+    }
+
+
+def resolve_training_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve nested training config with old flat keys as fallbacks."""
+
+    training_section = config.get("training", {})
+    if not isinstance(training_section, dict):
+        training_section = {}
+
+    return {
+        "epochs": _int_config(training_section, config, "epochs", 100),
+        "early_stopping_patience": _int_config(
+            training_section, config, "early_stopping_patience", 10
+        ),
+        "early_stopping_min_delta": _float_config(
+            training_section, config, "early_stopping_min_delta", 0.0
+        ),
+        "learning_rate": _float_config(training_section, config, "learning_rate", 1e-4),
+        "batch_size": _int_config(training_section, config, "batch_size", 8),
+        "num_workers": _int_config(training_section, config, "num_workers", 4),
+        "use_amp": _bool_config(training_section, config, "use_amp", True),
+        "gradient_clip_norm": float(
+            training_section.get(
+                "gradient_clip_norm",
+                config.get("gradient_clip_norm", config.get("grad_clip", 1.0)),
+            )
+        ),
+    }
+
+
+def _float_config(
+    nested: dict[str, Any],
+    flat: dict[str, Any],
+    key: str,
+    default: float,
+) -> float:
+    return float(nested.get(key, flat.get(key, default)))
+
+
+def _int_config(
+    nested: dict[str, Any],
+    flat: dict[str, Any],
+    key: str,
+    default: int,
+) -> int:
+    return int(nested.get(key, flat.get(key, default)))
+
+
+def _bool_config(
+    nested: dict[str, Any],
+    flat: dict[str, Any],
+    key: str,
+    default: bool,
+) -> bool:
+    return bool(nested.get(key, flat.get(key, default)))
+
+
+def _set_nested_config_value(
+    config: dict[str, Any],
+    section: str,
+    key: str,
+    value: Any,
+) -> None:
+    if not isinstance(config.get(section), dict):
+        config[section] = {}
+    config[section][key] = value
+
+
 def train_one_class(
     class_name: str,
     config: dict[str, Any],
@@ -89,13 +186,33 @@ def train_one_class(
     """Train DRAEM for a single MVTec class."""
 
     config = dict(config)
+    loss_config = resolve_loss_config(config)
+    training_config = resolve_training_config(config)
     if epochs_override is not None:
+        training_config["epochs"] = epochs_override
         config["epochs"] = epochs_override
+        _set_nested_config_value(config, "training", "epochs", epochs_override)
     if early_stopping_patience is not None:
+        training_config["early_stopping_patience"] = early_stopping_patience
         config["early_stopping_patience"] = early_stopping_patience
+        _set_nested_config_value(
+            config,
+            "training",
+            "early_stopping_patience",
+            early_stopping_patience,
+        )
     if debug:
         config["num_workers"] = 0
-        config["batch_size"] = min(int(config.get("batch_size", 8)), 2)
+        training_config["num_workers"] = 0
+        training_config["batch_size"] = min(int(training_config["batch_size"]), 2)
+        config["batch_size"] = training_config["batch_size"]
+        _set_nested_config_value(config, "training", "num_workers", 0)
+        _set_nested_config_value(
+            config,
+            "training",
+            "batch_size",
+            training_config["batch_size"],
+        )
 
     seed = int(config.get("seed", 42))
     set_deterministic_seed(seed)
@@ -111,7 +228,7 @@ def train_one_class(
     save_config_snapshot(config, checkpoint_dir / "config_snapshot.yaml")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_amp = bool(config.get("use_amp", True)) and device.type == "cuda"
+    use_amp = bool(training_config["use_amp"]) and device.type == "cuda"
     print(f"Training class '{class_name}' on {device} (AMP={use_amp}).")
 
     train_dataset = MVTecTrainDataset(
@@ -138,37 +255,32 @@ def train_one_class(
     generator.manual_seed(seed)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=int(config.get("batch_size", 8)),
+        batch_size=int(training_config["batch_size"]),
         shuffle=True,
-        num_workers=int(config.get("num_workers", 4)),
+        num_workers=int(training_config["num_workers"]),
         pin_memory=device.type == "cuda",
         generator=generator,
         worker_init_fn=seed_worker,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=int(config.get("batch_size", 8)),
+        batch_size=int(training_config["batch_size"]),
         shuffle=False,
-        num_workers=int(config.get("num_workers", 4)),
+        num_workers=int(training_config["num_workers"]),
         pin_memory=device.type == "cuda",
         worker_init_fn=seed_worker,
     )
 
     model = DRAEM().to(device)
-    criterion = DRAEMLoss(
-        reconstruction_weight=float(config.get("reconstruction_weight", 1.0)),
-        segmentation_weight=float(config.get("segmentation_weight", 1.0)),
-        ssim_weight=float(config.get("ssim_weight", 0.0)),
-        use_focal=bool(config.get("use_focal", False)),
-        focal_weight=float(config.get("focal_weight", 1.0)),
-    )
+    criterion = DRAEMLoss(**loss_config)
     val_reconstruction_loss = ReconstructionLoss(
-        ssim_weight=float(config.get("ssim_weight", 0.0))
+        mse_weight=float(loss_config["mse_weight"]),
+        ssim_weight=float(loss_config["ssim_weight"]),
     )
-    optimizer = Adam(model.parameters(), lr=float(config.get("learning_rate", 1e-4)))
-    epochs = int(config.get("epochs", 100))
-    patience = int(config.get("early_stopping_patience", 10))
-    min_delta = float(config.get("early_stopping_min_delta", 0.0))
+    optimizer = Adam(model.parameters(), lr=float(training_config["learning_rate"]))
+    epochs = int(training_config["epochs"])
+    patience = int(training_config["early_stopping_patience"])
+    min_delta = float(training_config["early_stopping_min_delta"])
     scheduler = CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     scaler = GradScaler(enabled=use_amp)
 
@@ -202,7 +314,7 @@ def train_one_class(
             scaler=scaler,
             device=device,
             use_amp=use_amp,
-            grad_clip=float(config.get("grad_clip", 1.0)),
+            grad_clip=float(training_config["gradient_clip_norm"]),
             max_batches=max_train_batches,
         )
         val_metrics = validate_epoch(
@@ -212,8 +324,8 @@ def train_one_class(
             device=device,
             use_amp=use_amp,
             threshold_percentile=float(config.get("threshold_percentile", 99.5)),
-            reconstruction_weight=float(config.get("reconstruction_weight", 1.0)),
-            segmentation_weight=float(config.get("segmentation_weight", 1.0)),
+            reconstruction_weight=float(loss_config["reconstruction_weight"]),
+            segmentation_weight=float(loss_config["segmentation_weight"]),
             max_batches=max_val_batches,
         )
         scheduler.step()
@@ -222,9 +334,15 @@ def train_one_class(
         lr = optimizer.param_groups[0]["lr"]
         row = {
             "epoch": epoch,
-            "train_loss": train_metrics["loss"],
-            "train_recon_loss": train_metrics["recon_loss"],
-            "train_seg_loss": train_metrics["seg_loss"],
+            "train_loss": train_metrics["total_loss"],
+            "train_mse_loss": train_metrics["mse_loss"],
+            "train_ssim_loss": train_metrics["ssim_loss"],
+            "train_bce_loss": train_metrics["bce_loss"],
+            "train_dice_loss": train_metrics["dice_loss"],
+            "train_focal_loss": train_metrics["focal_loss"],
+            "train_recon_loss": train_metrics["reconstruction_loss"],
+            "train_seg_loss": train_metrics["segmentation_loss"],
+            "train_total_loss": train_metrics["total_loss"],
             "val_loss": val_metrics["loss"],
             "val_recon_loss": val_metrics["recon_loss"],
             "val_anomaly_mean": val_metrics["anomaly_mean"],
@@ -253,6 +371,8 @@ def train_one_class(
             best_val_loss=best_val_loss,
             epochs_without_improvement=epochs_without_improvement,
             config=config,
+            loss_config=loss_config,
+            training_config=training_config,
         )
         save_checkpoint(state, checkpoint_dir / "last.pth")
 
@@ -264,11 +384,19 @@ def train_one_class(
             save_checkpoint(state, checkpoint_dir / f"epoch_{epoch:04d}.pth")
 
         if epoch % int(config.get("save_visual_every", 5)) == 0:
-            save_training_visual(model, train_loader, device, visual_dir / f"epoch_{epoch:04d}.png")
+            save_training_visual(
+                model,
+                train_loader,
+                device,
+                visual_dir / f"epoch_{epoch:04d}.png",
+            )
 
         print(
             f"[{class_name}] epoch {epoch}/{epochs} "
-            f"train={row['train_loss']:.5f} val={row['val_loss']:.5f} "
+            f"total={row['train_total_loss']:.5f} mse={row['train_mse_loss']:.5f} "
+            f"ssim={row['train_ssim_loss']:.5f} bce={row['train_bce_loss']:.5f} "
+            f"dice={row['train_dice_loss']:.5f} focal={row['train_focal_loss']:.5f} "
+            f"val={row['val_loss']:.5f} "
             f"lr={lr:.6g} time={epoch_seconds:.1f}s"
         )
         if patience > 0 and epochs_without_improvement >= patience:
@@ -307,13 +435,22 @@ def train_epoch(
     max_batches: int | None = None,
 ) -> dict[str, float]:
     model.train()
-    totals = {"loss": 0.0, "recon_loss": 0.0, "seg_loss": 0.0}
+    totals = {
+        "total_loss": 0.0,
+        "reconstruction_loss": 0.0,
+        "segmentation_loss": 0.0,
+        "mse_loss": 0.0,
+        "ssim_loss": 0.0,
+        "bce_loss": 0.0,
+        "dice_loss": 0.0,
+        "focal_loss": 0.0,
+    }
     count = 0
 
     for batch_index, batch in enumerate(iter_progress(loader, desc="train"), start=1):
         clean = batch["clean_image"].to(device, non_blocking=True)
         synthetic = batch["anomalous_image"].to(device, non_blocking=True)
-        mask = batch["anomaly_mask"].to(device, non_blocking=True)
+        mask = batch["anomaly_mask"].to(device, non_blocking=True).float()
 
         optimizer.zero_grad(set_to_none=True)
         with autocast(enabled=use_amp):
@@ -333,9 +470,8 @@ def train_epoch(
         scaler.update()
 
         batch_size = clean.shape[0]
-        totals["loss"] += losses["total_loss"].detach().item() * batch_size
-        totals["recon_loss"] += losses["reconstruction_loss"].detach().item() * batch_size
-        totals["seg_loss"] += losses["segmentation_loss"].detach().item() * batch_size
+        for key in totals:
+            totals[key] += losses[key].detach().item() * batch_size
         count += batch_size
 
         if max_batches is not None and batch_index >= max_batches:
@@ -439,6 +575,8 @@ def checkpoint_state(
     best_val_loss: float,
     epochs_without_improvement: int,
     config: dict[str, Any],
+    loss_config: dict[str, Any],
+    training_config: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "epoch": epoch,
@@ -450,6 +588,8 @@ def checkpoint_state(
         "best_val_loss": best_val_loss,
         "epochs_without_improvement": epochs_without_improvement,
         "config": config,
+        "loss_config": dict(loss_config),
+        "training_config": dict(training_config),
         "rng_state": {
             "python": random.getstate(),
             "torch": torch.get_rng_state(),
@@ -502,6 +642,17 @@ def load_checkpoint(
 def ensure_log_header(log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     if log_path.exists():
+        with log_path.open("r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            existing_columns = reader.fieldnames or []
+            rows = list(reader)
+        if all(column in existing_columns for column in LOG_COLUMNS):
+            return
+        with log_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=LOG_COLUMNS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row.get(key, "") for key in LOG_COLUMNS})
         return
     with log_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=LOG_COLUMNS)
@@ -511,7 +662,7 @@ def ensure_log_header(log_path: Path) -> None:
 def append_log_row(log_path: Path, row: dict[str, Any]) -> None:
     with log_path.open("a", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=LOG_COLUMNS)
-        writer.writerow({key: row[key] for key in LOG_COLUMNS})
+        writer.writerow({key: row.get(key, "") for key in LOG_COLUMNS})
 
 
 def write_tensorboard(writer: Any, row: dict[str, Any]) -> None:

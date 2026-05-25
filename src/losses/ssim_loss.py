@@ -69,10 +69,11 @@ class SSIMLoss(nn.Module):
 
 
 class ReconstructionLoss(nn.Module):
-    """MSE reconstruction loss with optional SSIM term."""
+    """Weighted MSE + SSIM reconstruction loss."""
 
-    def __init__(self, ssim_weight: float = 0.0) -> None:
+    def __init__(self, mse_weight: float = 1.0, ssim_weight: float = 0.0) -> None:
         super().__init__()
+        self.mse_weight = mse_weight
         self.ssim_weight = ssim_weight
         self.ssim_loss = SSIMLoss()
 
@@ -83,7 +84,7 @@ class ReconstructionLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
         mse_loss = F.mse_loss(reconstruction, clean_image)
         ssim_loss = self.ssim_loss(reconstruction, clean_image)
-        total = mse_loss + self.ssim_weight * ssim_loss
+        total = self.mse_weight * mse_loss + self.ssim_weight * ssim_loss
         return {
             "reconstruction_loss": total,
             "mse_loss": mse_loss,

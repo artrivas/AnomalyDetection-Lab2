@@ -42,16 +42,20 @@ class FocalLoss(nn.Module):
 
 
 class SegmentationLoss(nn.Module):
-    """BCEWithLogits + Dice loss with optional focal term."""
+    """Weighted BCEWithLogits + Dice loss with optional focal term."""
 
     def __init__(
         self,
+        bce_weight: float = 1.0,
+        dice_weight: float = 1.0,
         use_focal: bool = False,
         focal_weight: float = 1.0,
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
     ) -> None:
         super().__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
         self.use_focal = use_focal
         self.focal_weight = focal_weight
         self.bce_loss = nn.BCEWithLogitsLoss()
@@ -63,11 +67,12 @@ class SegmentationLoss(nn.Module):
         logits: torch.Tensor,
         synthetic_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        bce_loss = self.bce_loss(logits, synthetic_mask.float())
+        synthetic_mask = _prepare_binary_mask(logits, synthetic_mask)
+        bce_loss = self.bce_loss(logits, synthetic_mask)
         dice_loss = self.dice_loss(logits, synthetic_mask)
         focal_loss = self.focal_loss(logits, synthetic_mask)
 
-        total = bce_loss + dice_loss
+        total = self.bce_weight * bce_loss + self.dice_weight * dice_loss
         if self.use_focal:
             total = total + self.focal_weight * focal_loss
 
@@ -86,17 +91,29 @@ class DRAEMLoss(nn.Module):
         self,
         reconstruction_weight: float = 1.0,
         segmentation_weight: float = 1.0,
+        mse_weight: float = 1.0,
         ssim_weight: float = 0.0,
+        bce_weight: float = 1.0,
+        dice_weight: float = 1.0,
         use_focal: bool = False,
         focal_weight: float = 1.0,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
     ) -> None:
         super().__init__()
         self.reconstruction_weight = reconstruction_weight
         self.segmentation_weight = segmentation_weight
-        self.reconstruction_loss = ReconstructionLoss(ssim_weight=ssim_weight)
+        self.reconstruction_loss = ReconstructionLoss(
+            mse_weight=mse_weight,
+            ssim_weight=ssim_weight,
+        )
         self.segmentation_loss = SegmentationLoss(
+            bce_weight=bce_weight,
+            dice_weight=dice_weight,
             use_focal=use_focal,
             focal_weight=focal_weight,
+            focal_alpha=focal_alpha,
+            focal_gamma=focal_gamma,
         )
 
     def forward(
@@ -119,3 +136,18 @@ class DRAEMLoss(nn.Module):
             **reconstruction_terms,
             **segmentation_terms,
         }
+
+
+def _prepare_binary_mask(logits: torch.Tensor, synthetic_mask: torch.Tensor) -> torch.Tensor:
+    if logits.dim() != 4 or logits.shape[1] != 1:
+        raise ValueError(
+            f"Segmentation logits must have shape [B, 1, H, W], got {logits.shape}."
+        )
+    if synthetic_mask.dim() == 3:
+        synthetic_mask = synthetic_mask.unsqueeze(1)
+    if synthetic_mask.shape != logits.shape:
+        raise ValueError(
+            f"Synthetic mask must have shape [B, 1, H, W], got {synthetic_mask.shape} "
+            f"for logits {logits.shape}."
+        )
+    return (synthetic_mask > 0.5).to(dtype=logits.dtype, device=logits.device)

@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum visualizations to save per defect type.",
     )
     parser.add_argument(
+        "--threshold_percentile",
+        type=float,
+        default=None,
+        help="Override the normal-validation percentile used for thresholding.",
+    )
+    parser.add_argument(
         "--gaussian_sigma",
         type=float,
         default=None,
@@ -72,6 +78,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override morphological closing kernel size.",
+    )
+    parser.add_argument(
+        "--no_closing",
+        action="store_true",
+        help="Disable morphological closing during mask post-processing.",
+    )
+    parser.add_argument(
+        "--use_weak_class_postprocessing",
+        action="store_true",
+        help="Use weak-class post-processing defaults from the config.",
     )
     parser.add_argument(
         "--threshold_sweep",
@@ -119,9 +135,12 @@ def main() -> None:
         checkpoint=args.checkpoint,
         checkpoint_type=args.checkpoint_type,
         save_visuals=args.save_visuals,
+        threshold_percentile=args.threshold_percentile,
         gaussian_sigma=args.gaussian_sigma,
         min_component_area=args.min_component_area,
+        no_closing=args.no_closing,
         closing_kernel_size=args.closing_kernel_size,
+        use_weak_class_postprocessing=args.use_weak_class_postprocessing,
         max_visuals_per_defect=args.max_visuals_per_defect,
         threshold_sweep=args.threshold_sweep,
         oracle_threshold_analysis=args.oracle_threshold_analysis,

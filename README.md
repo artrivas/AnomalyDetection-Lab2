@@ -102,6 +102,44 @@ python train.py --class_name all
 
 Training uses only `train/good` images. Real anomalous test images and `ground_truth` masks are not used for training.
 
+## Training with stronger DRAEM-style losses
+
+The default training config now uses a stronger DRAEM-style objective:
+
+```text
+reconstruction: MSE + SSIM
+segmentation: BCEWithLogits + Dice + Focal
+```
+
+MSE keeps pixel-level reconstruction close to the clean image, while SSIM adds
+pressure to preserve local image structure. For segmentation, BCE learns the
+binary synthetic anomaly mask, Dice helps with foreground/background imbalance,
+and Focal loss can put more weight on hard or small anomalous pixels.
+
+These loss changes require retraining. They do not improve checkpoints that were
+already trained with the old loss recipe.
+
+Recommended first retrain only weak classes:
+
+```text
+capsule, screw, wood, toothbrush, cable, grid
+```
+
+Train from scratch:
+
+```bash
+python train.py --class_name capsule
+python train.py --class_name screw
+```
+
+Resume weak-class retraining from the last checkpoint:
+
+```bash
+python train.py --class_name capsule --resume outputs/checkpoints/capsule/last.pth
+python train.py --class_name screw --resume outputs/checkpoints/screw/last.pth
+python train.py --class_name wood --resume outputs/checkpoints/wood/last.pth
+```
+
 ## Evaluation
 
 Evaluate one class with the best checkpoint and save visualizations:
@@ -223,6 +261,41 @@ python evaluate.py --class_name capsule --check_masks
 Retrain only after these checks show that the raw anomaly maps are flat,
 reconstructions are poor, or the model genuinely fails to separate defective
 regions from normal validation scores.
+
+## Evaluation configuration and F1 sensitivity
+
+Pixel-level F1 is computed after converting the continuous anomaly map into a
+binary predicted mask. The threshold and post-processing settings can strongly
+change F1 without changing the checkpoint.
+
+Lower thresholds usually increase recall, but may reduce precision. Higher
+thresholds usually increase precision, but may reduce recall or produce empty
+masks. Gaussian smoothing can remove noise, but can also blur tiny defects.
+Removing small connected components can remove false positives, but may also
+remove real tiny defects. Morphological closing can fill holes, but may expand
+predicted regions.
+
+For weak classes such as capsule, screw, grid, toothbrush, and wood, try a lower
+threshold and weaker post-processing before retraining:
+
+```bash
+python evaluate.py --class_name capsule --checkpoint_type best --threshold_sweep
+python evaluate.py --class_name screw --checkpoint_type best --threshold_sweep
+python evaluate.py --class_name capsule --checkpoint_type best --postprocess_ablation
+python evaluate.py --class_name capsule --checkpoint_type best --use_weak_class_postprocessing
+python evaluate.py --class_name screw --checkpoint_type best --use_weak_class_postprocessing
+```
+
+Manual override example:
+
+```bash
+python evaluate.py --class_name capsule --checkpoint_type best --threshold_percentile 95 --gaussian_sigma 1.0 --min_component_area 0 --no_closing
+```
+
+Official thresholds are computed from normal validation images and saved as
+`outputs/metrics/<class_name>/threshold.json`. Threshold sweeps that select the
+best candidate using test F1 are saved only as analysis outputs and should not be
+reported as official metrics.
 
 ## Output Folders
 
