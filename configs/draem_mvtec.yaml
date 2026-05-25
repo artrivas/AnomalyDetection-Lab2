@@ -12,7 +12,7 @@ train_val_split: 0.8
 threshold_percentile: 99.5
 reconstruction_weight: 1.0
 segmentation_weight: 1.0
-checkpoint_every: 5
+checkpoint_every: 0
 save_visual_every: 5
 use_amp: true
 seed: 42

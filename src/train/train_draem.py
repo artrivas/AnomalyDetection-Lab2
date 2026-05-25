@@ -259,7 +259,8 @@ def train_one_class(
         if improved:
             save_checkpoint(state, checkpoint_dir / "best.pth")
 
-        if epoch % int(config.get("checkpoint_every", 5)) == 0:
+        checkpoint_every = int(config.get("checkpoint_every", 0))
+        if checkpoint_every > 0 and epoch % checkpoint_every == 0:
             save_checkpoint(state, checkpoint_dir / f"epoch_{epoch:04d}.pth")
 
         if epoch % int(config.get("save_visual_every", 5)) == 0:
