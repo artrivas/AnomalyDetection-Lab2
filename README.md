@@ -308,6 +308,41 @@ outputs/anomaly_maps/      raw anomaly score maps saved as NumPy arrays
 outputs/predicted_masks/   thresholded binary masks saved as PNG files
 ```
 
+## Single-image inference and visualization
+
+Use `infer_image.py` to run a trained DRAEM checkpoint on one image without
+retraining and without requiring ground-truth masks.
+
+Using an explicit threshold:
+
+```bash
+python infer_image.py --image_path ./my_image.png --checkpoint outputs/checkpoints/bottle/best.pth --threshold_value 0.05 --output_path outputs/single_inference/my_image.png
+```
+
+Using a class validation threshold:
+
+```bash
+python infer_image.py --image_path ./dataset/capsule/test/crack/000.png --checkpoint outputs/checkpoints/capsule/best.pth --class_name capsule --threshold_percentile 99.5 --output_path outputs/single_inference/capsule_000.png
+```
+
+Saving arrays and metadata:
+
+```bash
+python infer_image.py --image_path ./dataset/screw/test/scratch_head/001.png --checkpoint outputs/checkpoints/screw/best.pth --class_name screw --save_arrays --output_dir outputs/single_inference/screw_001/
+```
+
+The saved visualization shows:
+
+```text
+original image | reconstruction | anomaly map | predicted binary mask | overlay
+```
+
+The model outputs a continuous anomaly map. The binary predicted mask depends on
+`--threshold_value` or on a validation-derived threshold from
+`--threshold_percentile`. For fair MVTec evaluation, thresholds should come from
+normal validation images, not test masks. For a custom external image, using
+`--threshold_value` may be simpler.
+
 ## Metrics
 
 Metrics are computed at the pixel level for anomaly segmentation.

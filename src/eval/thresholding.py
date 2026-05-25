@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from src.data.mvtec_paths import MVTEC_CLASSES
 from src.data.mvtec_train_dataset import MVTecTrainDataset
+from src.eval.postprocessing import gaussian_smooth
 from src.models import DRAEM
 
 
@@ -111,11 +111,15 @@ def load_model_from_checkpoint(
         raise FileNotFoundError(f"Checkpoint does not exist: {path}")
 
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    if "model_state" not in checkpoint:
-        raise KeyError(f"Checkpoint is missing 'model_state': {path}")
+    if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+        state_dict = checkpoint["model_state"]
+    elif isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
 
     model = DRAEM().to(device)
-    model.load_state_dict(checkpoint["model_state"])
+    model.load_state_dict(state_dict)
     return model
 
 
@@ -128,28 +132,6 @@ def save_threshold_json(result: dict[str, Any], config: dict[str, Any]) -> Path:
         json.dump(result, file, indent=2)
         file.write("\n")
     return threshold_path
-
-
-def gaussian_smooth(anomaly_map: torch.Tensor, sigma: float) -> torch.Tensor:
-    if sigma <= 0:
-        return anomaly_map
-
-    radius = max(1, int(3 * sigma))
-    coords = torch.arange(
-        -radius,
-        radius + 1,
-        device=anomaly_map.device,
-        dtype=anomaly_map.dtype,
-    )
-    kernel_1d = torch.exp(-(coords**2) / (2 * sigma**2))
-    kernel_1d = kernel_1d / kernel_1d.sum()
-    kernel_x = kernel_1d.view(1, 1, 1, -1)
-    kernel_y = kernel_1d.view(1, 1, -1, 1)
-
-    smoothed = F.pad(anomaly_map, (radius, radius, 0, 0), mode="reflect")
-    smoothed = F.conv2d(smoothed, kernel_x)
-    smoothed = F.pad(smoothed, (0, 0, radius, radius), mode="reflect")
-    return F.conv2d(smoothed, kernel_y)
 
 
 def oracle_analysis_only_threshold(*_: Any, **__: Any) -> None:
